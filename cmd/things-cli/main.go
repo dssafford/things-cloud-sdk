@@ -847,6 +847,138 @@ func cmdMoveToToday(history *thingscloud.History, taskUUID string) {
 	outputJSON(map[string]string{"status": "moved-to-today", "uuid": taskUUID})
 }
 
+// ---------------------------------------------------------------------------
+// Repeating task command
+// ---------------------------------------------------------------------------
+
+type WireRepeaterDetail struct {
+	Day     *int `json:"dy,omitempty"`
+	Month   *int `json:"mo,omitempty"`
+	Weekday *int `json:"wd,omitempty"`
+	MonthOf *int `json:"wdo,omitempty"`
+}
+
+type WireRepeater struct {
+	FirstScheduledAt   int64                `json:"ia"`
+	RepeatCount        int                  `json:"rc"`
+	FrequencyUnit      int                  `json:"fu"`
+	FrequencyAmplitude int                  `json:"fa"`
+	Details            []WireRepeaterDetail `json:"of"`
+	LastScheduledAt    int64                `json:"ed"`
+	Version            int                  `json:"rrv"`
+	Type               int                  `json:"tp"`
+	TimeShift          int                  `json:"ts"`
+	StartReference     int64                `json:"sr"`
+}
+
+func cmdCreateRepeating(history *thingscloud.History, args []string) {
+	requireArgs(args, 2, `things-cli create-repeating "Title" daily|weekly|weekly-mon|biweekly|monthly|quarterly|yearly [--note ...] [--when ...] [--deadline ...] [--project UUID] [--area UUID] [--tags UUID,...]`)
+
+	title := args[0]
+	pattern := args[1]
+	opts := parseArgs(args[2:]) // optional flags after pattern
+	now := todayMidnightUTC()
+
+	// Default repeating tasks to "today" if no --when specified
+	if _, hasWhen := opts["when"]; !hasWhen {
+		opts["when"] = "today"
+	}
+
+	var rr WireRepeater
+	rr.Version = 4
+	rr.Type = 0
+	rr.TimeShift = 0
+	rr.StartReference = now
+	rr.FirstScheduledAt = now
+	rr.LastScheduledAt = 64092211200 // "Neverending" date
+	rr.RepeatCount = 0
+	rr.FrequencyAmplitude = 1
+
+	switch pattern {
+	case "daily":
+		rr.FrequencyUnit = 16
+		day := 0
+		rr.Details = []WireRepeaterDetail{{Day: &day}}
+	case "weekly":
+		// Default to current day of week
+		rr.FrequencyUnit = 256
+		wd := int(time.Now().Weekday())
+		rr.Details = []WireRepeaterDetail{{Weekday: &wd}}
+	case "weekly-mon":
+		rr.FrequencyUnit = 256
+		wd := 1
+		rr.Details = []WireRepeaterDetail{{Weekday: &wd}}
+	case "weekly-tue":
+		rr.FrequencyUnit = 256
+		wd := 2
+		rr.Details = []WireRepeaterDetail{{Weekday: &wd}}
+	case "weekly-wed":
+		rr.FrequencyUnit = 256
+		wd := 3
+		rr.Details = []WireRepeaterDetail{{Weekday: &wd}}
+	case "weekly-thu":
+		rr.FrequencyUnit = 256
+		wd := 4
+		rr.Details = []WireRepeaterDetail{{Weekday: &wd}}
+	case "weekly-fri":
+		rr.FrequencyUnit = 256
+		wd := 5
+		rr.Details = []WireRepeaterDetail{{Weekday: &wd}}
+	case "weekly-sat":
+		rr.FrequencyUnit = 256
+		wd := 6
+		rr.Details = []WireRepeaterDetail{{Weekday: &wd}}
+	case "weekly-sun":
+		rr.FrequencyUnit = 256
+		wd := 0
+		rr.Details = []WireRepeaterDetail{{Weekday: &wd}}
+	case "biweekly":
+		rr.FrequencyUnit = 256
+		rr.FrequencyAmplitude = 2
+		wd := int(time.Now().Weekday())
+		rr.Details = []WireRepeaterDetail{{Weekday: &wd}}
+	case "monthly":
+		rr.FrequencyUnit = 8
+		day := time.Now().Day() - 1 // 0-indexed
+		rr.Details = []WireRepeaterDetail{{Day: &day}}
+	case "quarterly":
+		rr.FrequencyUnit = 8
+		rr.FrequencyAmplitude = 3
+		day := time.Now().Day() - 1
+		rr.Details = []WireRepeaterDetail{{Day: &day}}
+	case "yearly":
+		rr.FrequencyUnit = 4
+		day := time.Now().Day() - 1
+		month := int(time.Now().Month()) - 1 // 0-indexed
+		rr.Details = []WireRepeaterDetail{{Day: &day, Month: &month}}
+	default:
+		fatalf("Unknown pattern: %s. Use daily, weekly, weekly-mon..weekly-sun, biweekly, monthly, quarterly, yearly", pattern)
+	}
+
+	taskUUID := opts["uuid"]
+	if taskUUID == "" {
+		taskUUID = generateUUID()
+	}
+
+	payload := newTaskCreatePayload(title, opts)
+
+	rrJSON, _ := json.Marshal(rr)
+	rawRR := json.RawMessage(rrJSON)
+	payload.Rr = &rawRR
+
+	env := writeEnvelope{id: taskUUID, action: 0, kind: "Task6", payload: payload}
+	if err := history.Write(env); err != nil {
+		fatal("create repeating task", err)
+	}
+
+	outputJSON(map[string]string{
+		"status":  "created-repeating",
+		"uuid":    taskUUID,
+		"title":   title,
+		"pattern": pattern,
+	})
+}
+
 func cmdCreateArea(history *thingscloud.History, args []string) {
 	requireArgs(args, 1, `things-cli create-area "Name" [--tags UUID,...] [--uuid UUID]`)
 
@@ -1207,6 +1339,7 @@ Write commands (fast — skip state loading):
   trash <uuid>
   purge <uuid>
   move-to-today <uuid>
+  create-repeating "Title" daily|weekly|weekly-mon|biweekly|monthly|quarterly|yearly [opts]
 
 Batch command (reads JSON from stdin, sends all ops in one HTTP request):
   batch
@@ -1273,6 +1406,9 @@ func main() {
 	case "move-to-today":
 		requireArgs(os.Args[2:], 1, "things-cli move-to-today <uuid>")
 		cmdMoveToToday(ctx.history, os.Args[2])
+	case "create-repeating":
+		requireArgs(os.Args[2:], 2, `things-cli create-repeating "Title" daily|weekly-mon|...`)
+		cmdCreateRepeating(ctx.history, os.Args[2:])
 	case "batch":
 		cmdBatch(ctx.history)
 
